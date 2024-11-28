@@ -527,8 +527,8 @@ if __name__ == '__main__':
     # data path
     parser.add_argument('--data_path', default='./datasets')
     parser.add_argument('--ann_path', default='./clip_train')
-    parser.add_argument('--train_file', default='downstream/cc3m_train_new.json')
-    parser.add_argument('--train_image_root', default='cc3m')
+    parser.add_argument('--train_file', default='cc3m_train_subset.json')
+    parser.add_argument('--train_image_root', default='cc3m_subset_100k')
 
     # model config
     parser.add_argument('--bert_config', default='configs/config_bert.json')
