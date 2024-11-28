@@ -4,5 +4,5 @@ clip_train*/
 pyrightconfig.json
 job_output*
 __pycache__/
-output/
-checkpoints/
+bimodal_exps/output/
+*/.ipynb_checkpoints

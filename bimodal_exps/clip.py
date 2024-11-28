@@ -152,7 +152,7 @@ def train(model, data_loader, optimizer, tokenizer, epoch, max_epoch, warmup_ste
     zero-shot transfer
     https://github.com/goel-shashank/CyCLIP/blob/52d77af2a5f1a4bff01b4c371d6b98e2d0340137/src/evaluate.py#L42
 """
-def create_zeroshot_dataloader(dataset_name, data_folder, image_size):
+def create_zeroshot_dataloader(dataset_name, data_folder, image_size, zeroshot_batch_size):
     assert dataset_name in ['cifar10', 'cifar100', 'imagenet']
 
     if dataset_name == 'cifar10':
@@ -181,7 +181,7 @@ def create_zeroshot_dataloader(dataset_name, data_folder, image_size):
     else:
         dataset = datasets.ImageFolder(root=data_folder, transform=val_transform)
 
-    data_loader = torch.utils.data.DataLoader(dataset, batch_size=512, shuffle=False,
+    data_loader = torch.utils.data.DataLoader(dataset, batch_size=zeroshot_batch_size, shuffle=False,
                                               num_workers=2, pin_memory=True)
 
     data_loader.num_samples = len(dataset)
@@ -354,16 +354,15 @@ def itm_eval(scores_i2t, scores_t2i, txt2img, img2txt):
                     'r_mean': r_mean}
     return eval_result
 
+def train_runner(args):
+    Path(args.output_dir).mkdir(parents=True, exist_ok=True)
 
+    json.dump(args.__dict__, open(os.path.join(args.output_dir, 'args.json'), 'w'), indent=2) 
 
-
-def main(args):
-    if args.distributed:
-        utils.init_distributed_mode(args)    
-    else:
-        args.gpu = 0
-    
+    args.gpu = 0
     device = torch.device(args.device)
+    print(device)
+    print(torch.cuda.get_device_name(torch.cuda.current_device()))
 
     # fix the seed for reproducibility
     seed = args.seed + utils.get_rank()
@@ -375,114 +374,35 @@ def main(args):
     #### Dataset #### 
     print("Creating retrieval dataset")
     train_dataset = create_train_dataset('re', args)
-    # val_coco_dataset, test_coco_dataset = create_val_dataset('re', args, args.val_coco_file, args.coco_image_root, args.test_coco_file)
-    val_coco_dataset = create_val_dataset('re', args, args.val_coco_file, args.coco_image_root, None)
-    # val_flickr_dataset, test_flickr_dataset = create_val_dataset('re', args, args.val_flickr_file, args.flickr_image_root, args.test_flickr_file)
-    # sbu_dataset = create_val_dataset('re', args, args.sbu_file, args.sbu_image_root)
     print("len of train_dataset:", len(train_dataset))
-    # print("len of coco val/test:", len(val_coco_dataset), len(test_coco_dataset))
-    print("len of coco val:", len(val_coco_dataset))
-    # print("len of flickr val/test:", len(val_flickr_dataset), len(test_flickr_dataset))
-    # print("len of sbu data:", len(sbu_dataset))
-
-    if args.extract_data:
-        idx_list = []
-        data_dir = os.path.join(args.output_dir, '')
-        Path(data_dir).mkdir(parents=True, exist_ok=True)
-
-        for idx in tqdm(idx_list):
-            image, text, _, _ = train_dataset.__getitem__(idx, enable_transform=False)
-            torchvision.utils.save_image(image, fp=os.path.join(data_dir, str(idx)+':'+text+'.png'))
-            
-        shutil.make_archive(data_dir, 'zip', data_dir)
-
-        assert 0
 
     num_training = int(args.train_frac * len(train_dataset))
     train_dataset = Subset(train_dataset, list(range(num_training)))
 
-
-    if args.distributed:
-        num_tasks = utils.get_world_size()
-        global_rank = utils.get_rank()            
-        samplers = create_sampler([train_dataset], [True], num_tasks, global_rank) + [None, None]
-    else:
-        samplers = [None, None, None]
+    samplers = [None, None, None]
 
     train_loader = create_train_loader(train_dataset, samplers[0], args.batch_size_train, 2, None)
-
-    # val_coco_loader, test_coco_loader = create_val_loader([val_coco_dataset, test_coco_dataset], samplers[1:], 
-    #                                                       [args.batch_size_test]*2, [8]*2, [None]*2)
-    val_coco_loader = create_val_loader([val_coco_dataset], samplers[1:2], 
-                                        [args.batch_size_test], [8], [None])[0]
-    # val_flickr_loader, test_flickr_loader = create_val_loader([val_flickr_dataset, test_flickr_dataset], samplers[1:], 
-    #                                                           [args.batch_size_test]*2, [8]*2, [None]*2)
-    # sbu_loader= create_val_loader([sbu_dataset], [None], [args.batch_size_test], [32], [None])[0]
-       
+        
     if args.text_encoder == 'roberta-large':
         tokenizer = RobertaTokenizer.from_pretrained(args.text_encoder)
     else:
         tokenizer = AutoTokenizer.from_pretrained(args.text_encoder)
 
-    #### Zero-shot transfer ####
-    if args.zs_dataset:
-        zeroshot_dataloader = create_zeroshot_dataloader(dataset_name=args.zs_dataset, data_folder=args.zs_datafolder, image_size=args.image_res)
-    else:
-        zeroshot_dataloader = None
 
     #### Model #### 
     print("Creating model")
     model = CLIP(image_encoder=args.image_encoder, text_encoder=args.text_encoder, embed_dim=args.embed_dim, init_model=args.init_model, bsz=args.batch_size_train*args.world_size,
-                  world_size=args.world_size, ita_type=args.ita_type, sogclr_gamma=args.sogclr_gamma, rho_I=args.rho_I, rho_T=args.rho_T, tau_init=args.tau_init,
-                  eta_init=args.eta_init, beta_u=args.beta_u, temp=args.temp, learnable_temp=args.learnable_temp,
-                  vicreg_sim_coeff=args.vicreg_sim_coeff, vicreg_std_coeff=args.vicreg_std_coeff, personalized_tau=args.personalized_tau, 
-                  use_temp_net=args.isogclr_temp_net, alpha=args.alpha, distributed=args.distributed)
+                    world_size=args.world_size, ita_type=args.ita_type, sogclr_gamma=args.sogclr_gamma, rho_I=args.rho_I, rho_T=args.rho_T, rho_init=args.rho_init, tau_init=args.tau_init,
+                    eta_init=args.eta_init, beta_u=args.beta_u, temp=args.temp, learnable_temp=args.learnable_temp,
+                    vicreg_sim_coeff=args.vicreg_sim_coeff, vicreg_std_coeff=args.vicreg_std_coeff, personalized_tau=args.personalized_tau, 
+                    use_temp_net=args.isogclr_temp_net, alpha=args.alpha, distributed=args.distributed)
     model = model.to(device)
 
-    if args.evaluate or args.ita_type == 'isogclr_denoise':
-        assert len(args.checkpoint) > 0
-        checkpoint = torch.load(args.checkpoint, map_location='cpu') 
-        state_dict = checkpoint['model']             
-        model.load_state_dict(state_dict, strict=False)  
-        print('load checkpoint from %s' % args.checkpoint)
-
-    if args.check_samples_tau:
-        image_tau_array = []
-        text_tau_array = []
-
-        model.eval() 
-    
-        with torch.no_grad():
-            for image, text, idx, text_idx in tqdm(train_loader):
-                image = image.to(device)
-                text = tokenizer(text, padding='max_length', truncation=True, max_length=30, return_tensors="pt").to(device)
-
-                image_feat = F.normalize(model.vision_proj(model.visual_encoder(image)), dim=-1)
-                text_output = model.text_encoder(text.input_ids, attention_mask=text.attention_mask, output_hidden_states=False)
-                text_feat = F.normalize(model.text_proj(text_output.last_hidden_state[:,0,:]), dim=-1)
-            
-                tau_image = model.criterion.image_temp_gen(image_feat).cpu().squeeze().numpy()
-                tau_text = model.criterion.text_temp_gen(text_feat).cpu().squeeze().numpy()
-
-                image_tau_array.append(tau_image)
-                text_tau_array.append(tau_text)
-
-            image_tau_array = np.concatenate(image_tau_array) 
-            text_tau_array = np.concatenate(text_tau_array)
-
-        with open(os.path.join(args.output_dir, "tau.pkl"), "wb") as f:
-            pickle.dump({"tau_image":image_tau_array, "tau_text":text_tau_array}, f, protocol=pickle.HIGHEST_PROTOCOL)
-
-        assert 0
 
     optimizer = create_optimizer(args, model)
     lr_scheduler, _ = create_scheduler(args, optimizer)
-    if args.distributed:
-        model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[args.gpu])
-        model_without_ddp = model.module
-    else:
-        model_without_ddp = model
-
+    model_without_ddp = model
+    
     if args.use_amp:
         grad_scaler = torch.cuda.amp.GradScaler()
     else:
@@ -490,116 +410,115 @@ def main(args):
 
     max_epoch = args.epochs
     warmup_steps = args.warmup_epochs
-    best = 0
-    best_epoch = 0
 
     print("Start training")
     start_time = time.time()    
     for epoch in range(0, max_epoch):
-        if not args.evaluate:
-            if args.distributed:
-                train_loader.sampler.set_epoch(epoch)
-            train_stats = train(model, train_loader, optimizer, tokenizer, epoch, max_epoch, warmup_steps, device, lr_scheduler, 
-                                grad_scaler, args)
+        train_stats = train(model, train_loader, optimizer, tokenizer, epoch, max_epoch, warmup_steps, device, lr_scheduler, 
+                            grad_scaler, args)
+        
+        log_stats = {**{f'train_{k}': v for k, v in train_stats.items()},     
+                        'epoch': epoch,
+                        'data': 'coco',
+                    }
+        with open(os.path.join(args.output_dir, "coco_log.txt"),"a") as f:
+            f.write(json.dumps(log_stats) + "\n")
+
+        save_obj = {
+            'model': model_without_ddp.state_dict()
+        }
+        torch.save(save_obj, os.path.join(args.output_dir, 'checkpoint_'+str(epoch+1)+'.pth'))
             
-        if args.evaluate:
-            score_val_i2t_coco, score_val_t2i_coco = evaluation(model_without_ddp, val_coco_loader, tokenizer, device, args)
-            # score_test_i2t_coco, score_test_t2i_coco = evaluation(model_without_ddp, test_coco_loader, tokenizer, device, args)
-
-            # score_val_i2t_flickr, score_val_t2i_flickr = evaluation(model_without_ddp, val_flickr_loader, tokenizer, device, args)
-            # score_test_i2t_flickr, score_test_t2i_flickr = evaluation(model_without_ddp, test_flickr_loader, tokenizer, device, args)
-    
-        if utils.is_main_process():  
-
-            if args.evaluate:
-                val_result_coco = itm_eval(score_val_i2t_coco, score_val_t2i_coco, val_coco_loader.dataset.txt2img, val_coco_loader.dataset.img2txt)  
-                print("coco val:", val_result_coco)
-                # test_result_coco = itm_eval(score_test_i2t_coco, score_test_t2i_coco, test_coco_loader.dataset.txt2img, test_coco_loader.dataset.img2txt)    
-                # print("coco test:", test_result_coco)
-
-                if args.zs_dataset:
-                    zeroshot_results = zeroshot_transfer(model_without_ddp, zeroshot_dataloader, args.zs_dataset, tokenizer, device)
-                    print("zeroshot:", zeroshot_results)
-                else:
-                    zeroshot_results = None
-
-                # val_result_flickr = itm_eval(score_val_i2t_flickr, score_val_t2i_flickr, val_flickr_loader.dataset.txt2img, val_flickr_loader.dataset.img2txt)  
-                # print("flickr val:", val_result_flickr)
-                # test_result_flickr = itm_eval(score_test_i2t_flickr, score_test_t2i_flickr, test_flickr_loader.dataset.txt2img, test_flickr_loader.dataset.img2txt)    
-                # print("flickr test:", test_result_flickr)
-
-            # save tau for visualization
-            if not args.evaluate and args.store_tau and (epoch+1)%10==0:
-                print("saving tau...")
-                tau_image = model_without_ddp.criterion.tau_I.clone().cpu().numpy()
-                tau_text = model_without_ddp.criterion.tau_T.clone().cpu().numpy()
-
-                with open(os.path.join(args.output_dir, "tau_"+str(epoch)+".pkl"), "wb") as f:
-                    pickle.dump({"tau_image":tau_image, "tau_text":tau_text}, f, protocol=pickle.HIGHEST_PROTOCOL)
-            
-            if args.evaluate:                
-                log_stats = {**{f'val_{k}': v for k, v in val_result_coco.items()},
-                             # **{f'test_{k}': v for k, v in test_result_coco.items()},                  
-                             'epoch': epoch,
-                             'data': 'coco',
-                            }
-                with open(os.path.join(args.output_dir, "coco_log.txt"),"a") as f:
-                    f.write(json.dumps(log_stats) + "\n")    
-
-                # log_stats = {**{f'val_{k}': v for k, v in val_result_flickr.items()},
-                #              **{f'test_{k}': v for k, v in test_result_flickr.items()},                  
-                #              'epoch': epoch,
-                #              'data': 'flickr',
-                #             }
-                # with open(os.path.join(args.output_dir, "flickr_log.txt"),"a") as f:
-                #     f.write(json.dumps(log_stats) + "\n") 
-
-                if zeroshot_results:
-                    with open(os.path.join(args.output_dir, f"zeroshot_{args.zs_dataset}_log.txt"), "a") as f:
-                        f.write(json.dumps(zeroshot_results) + "\n")
-
-            else:
-                log_stats = {**{f'train_{k}': v for k, v in train_stats.items()},
-                            #  **{f'val_{k}': v for k, v in val_result_coco.items()},
-                             # **{f'test_{k}': v for k, v in test_result_coco.items()},                  
-                             'epoch': epoch,
-                             'data': 'coco',
-                            }
-                with open(os.path.join(args.output_dir, "coco_log.txt"),"a") as f:
-                    f.write(json.dumps(log_stats) + "\n")
-
-                # if val_result_coco['r_mean'] > best:
-                #     save_obj = {
-                #         'model': model_without_ddp.state_dict(),
-                #         'optimizer': optimizer.state_dict(),
-                #         'lr_scheduler': lr_scheduler.state_dict(),
-                #         'args': args,
-                #         'epoch': epoch,
-                #     }
-                #     torch.save(save_obj, os.path.join(args.output_dir, 'checkpoint_best.pth'))  
-                #     best = val_result_coco['r_mean']    
-                #     best_epoch = epoch
-
-                save_obj = {
-                    'model': model_without_ddp.state_dict()
-                }
-                torch.save(save_obj, os.path.join(args.output_dir, 'checkpoint_'+str(epoch+1)+'.pth'))
-                    
-        if args.evaluate: 
-            break
-           
         lr_scheduler.step(epoch+warmup_steps+1)  
-        if args.distributed:
-            dist.barrier()     
         torch.cuda.empty_cache()
 
     total_time = time.time() - start_time
     total_time_str = str(datetime.timedelta(seconds=int(total_time)))
     print('Training time {}'.format(total_time_str)) 
 
-    if utils.is_main_process():   
-        with open(os.path.join(args.output_dir, "coco_log.txt"),"a") as f:
-            f.write("best epoch: %d"%best_epoch)             
+
+def eval_runner(args):
+
+    args.gpu = 0
+    device = torch.device(args.device)
+    print(device)
+    print(torch.cuda.get_device_name(torch.cuda.current_device()))
+
+    # fix the seed for reproducibility
+    seed = args.seed + utils.get_rank()
+    torch.manual_seed(seed)
+    np.random.seed(seed)
+    random.seed(seed)
+    cudnn.benchmark = True
+
+    #### Dataset #### 
+    print("Creating retrieval dataset")
+    val_coco_dataset = create_val_dataset('re', args, args.val_coco_file, args.coco_image_root, None)
+    print("len of coco val:", len(val_coco_dataset))
+
+    samplers = [None, None, None]
+
+    val_coco_loader = create_val_loader([val_coco_dataset], samplers[1:2],
+                                        [args.batch_size_test], [8], [None])[0]
+        
+    if args.text_encoder == 'roberta-large':
+        tokenizer = RobertaTokenizer.from_pretrained(args.text_encoder)
+    else:
+        tokenizer = AutoTokenizer.from_pretrained(args.text_encoder)
+
+    #### Zero-shot transfer ####
+    if args.zs_dataset:
+        zeroshot_dataloader = create_zeroshot_dataloader(dataset_name=args.zs_dataset, data_folder=args.zs_datafolder, image_size=args.image_res, zeroshot_batch_size = args.zeroshot_batch_size)
+    else:
+        zeroshot_dataloader = None
+
+    #### Model #### 
+    print("Creating model")
+    model = CLIP(image_encoder=args.image_encoder, text_encoder=args.text_encoder, embed_dim=args.embed_dim, init_model=args.init_model, bsz=args.batch_size_train*args.world_size,
+                    world_size=args.world_size, ita_type=args.ita_type, sogclr_gamma=args.sogclr_gamma, rho_I=args.rho_I, rho_T=args.rho_T, rho_init=args.rho_init,  tau_init=args.tau_init,
+                    eta_init=args.eta_init, beta_u=args.beta_u, temp=args.temp, learnable_temp=args.learnable_temp,
+                    vicreg_sim_coeff=args.vicreg_sim_coeff, vicreg_std_coeff=args.vicreg_std_coeff, personalized_tau=args.personalized_tau, 
+                    use_temp_net=args.isogclr_temp_net, alpha=args.alpha, distributed=args.distributed)
+    model = model.to(device)
+
+    assert len(args.checkpoint) > 0
+    checkpoint = torch.load(args.checkpoint, map_location='cpu') 
+    state_dict = checkpoint['model']
+    model.load_state_dict(state_dict, strict=False)
+    print('load checkpoint from %s' % args.checkpoint)
+
+
+    print("Start Evaluation")
+    start_time = time.time()   
+
+    score_val_i2t_coco, score_val_t2i_coco = evaluation(model, val_coco_loader, tokenizer, device, args)
+
+    val_result_coco = itm_eval(score_val_i2t_coco, score_val_t2i_coco, val_coco_loader.dataset.txt2img, val_coco_loader.dataset.img2txt)  
+    print("coco val:", val_result_coco)
+    
+    if args.zs_dataset:
+        zeroshot_results = zeroshot_transfer(model, zeroshot_dataloader, args.zs_dataset, tokenizer, device)
+        print("zeroshot:", zeroshot_results)
+    else:
+        zeroshot_results = None  
+
+    log_stats = {**{f'val_{k}': v for k, v in val_result_coco.items()},               
+                    'epoch': 0,
+                    'data': 'coco',
+                }
+    with open(os.path.join(args.output_dir, "coco_log.txt"),"a") as f:
+        f.write(json.dumps(log_stats) + "\n")
+
+
+        if zeroshot_results:
+            with open(os.path.join(args.output_dir, f"zeroshot_{args.zs_dataset}_log.txt"), "a") as f:
+                f.write(json.dumps(zeroshot_results) + "\n")
+        
+    torch.cuda.empty_cache()
+
+    total_time = time.time() - start_time
+    total_time_str = str(datetime.timedelta(seconds=int(total_time)))
+    print('Evaluation time {}'.format(total_time_str))         
 
             
 if __name__ == '__main__':
@@ -661,6 +580,7 @@ if __name__ == '__main__':
     parser.add_argument('--sogclr_gamma', default=0.8, type=float)
     parser.add_argument('--rho_I', default=8.0, type=float)
     parser.add_argument('--rho_T', default=8.0, type=float)
+    parser.add_argument('--rho_init', default=8.0, type=float)
     parser.add_argument('--eta_init', default=0.001, type=float)
     parser.add_argument('--tau_init', default=0.01, type=float)
     parser.add_argument('--beta_u', default=0.9, type=float)
@@ -683,6 +603,7 @@ if __name__ == '__main__':
 
     # zero-shot transfer
     parser.add_argument('--zs_dataset', default="", choices=['cifar10', 'cifar100', 'imagenet'])
+    parser.add_argument('--zeroshot_batch_size', default=512, type=float)
     parser.add_argument('--zs_datafolder', default='./datasets', type=str)
 
     args = parser.parse_args()
@@ -706,5 +627,7 @@ if __name__ == '__main__':
     Path(args.output_dir).mkdir(parents=True, exist_ok=True)
 
     json.dump(args.__dict__, open(os.path.join(args.output_dir, 'args.json'), 'w'), indent=2) 
-    
-    main(args)
+    if(args.evaluate == False):
+        train_runner(args)
+    else:
+        eval_runner(args)

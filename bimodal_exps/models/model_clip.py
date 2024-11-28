@@ -3,7 +3,7 @@ from functools import partial
 import timm
 from transformers import AutoModel, RobertaModel
 
-from models.losses import CLIP_Loss, CyCLIP_Loss, SogCLR_Loss, VICReg_Loss
+from models.losses import CLIP_Loss, CyCLIP_Loss, SogCLR_Loss, SogCLR_Loss_mine, SogCLR_v2_mine, VICReg_Loss
 from models.losses import iSogCLR_New_v2_Loss, iSogCLR_New_v1_Loss, onlineCLR_Loss, iSogCLR_New_Loss
 
 import torch
@@ -24,6 +24,7 @@ class CLIP(nn.Module):
                  rho_T = 0.1,
                  eta_init = 0.001,
                  tau_init = 0.01,
+                 rho_init = 0.1,
                  eta_sched = None,
                  eta_exp_gamma = 0.8,
                  beta_u = 0.9,
@@ -85,6 +86,12 @@ class CLIP(nn.Module):
             # self.criterion = SogCLR_Loss(world_size=world_size, gamma=sogclr_gamma, temperature=self.temp, bsz=bsz, enable_surrogate=enable_surrogate, 
             #                              surrogate_c=surrogate_c, lamda_rho=lamda_rho, lamda_init=lamda_init)
             self.criterion = SogCLR_Loss(world_size=world_size, gamma=sogclr_gamma, temperature=self.temp, bsz=bsz)
+        
+        elif self.ita_type == 'sogclr_mine':
+            self.criterion = SogCLR_Loss_mine(dim_size=embed_dim, world_size=world_size, gamma=sogclr_gamma, temperature=self.temp, bsz=bsz)
+
+        elif self.ita_type == 'sogclr_v2_mine':
+            self.criterion = SogCLR_v2_mine(dim_size=embed_dim, world_size=world_size, gamma=sogclr_gamma, temperature=self.temp, bsz=bsz)
 
         # elif self.ita_type == 'sogclr_dro':
         #     self.criterion = SogCLR_DRO_Loss(world_size=world_size, gamma=sogclr_gamma, rho_init=rho_init, tau_init=tau_init, bsz=bsz,
@@ -157,6 +164,36 @@ class CLIP(nn.Module):
             info_dict['avg_text_tau'] = 0.0
 
         elif self.ita_type == 'sogclr':
+            if self.distributed:
+                image_ids = concat_all_gather(idx)
+                text_ids = concat_all_gather(text_idx)
+            else:
+                image_ids, text_ids = idx, text_idx
+            loss_ita, avg_image_tau, avg_text_tau = self.criterion(image_feat, text_feat, image_ids, text_ids, epoch)
+            if not self.learnable_temp:
+                avg_tau = torch.tensor(self.temp)
+            else:
+                avg_tau = self.temp
+            info_dict['avg_text_tau'] = avg_text_tau
+            info_dict['avg_image_tau'] = avg_image_tau
+            info_dict['lamda'] = 0.0
+
+        elif self.ita_type == 'sogclr_mine':
+            if self.distributed:
+                image_ids = concat_all_gather(idx)
+                text_ids = concat_all_gather(text_idx)
+            else:
+                image_ids, text_ids = idx, text_idx
+            loss_ita, avg_image_tau, avg_text_tau = self.criterion(image_feat, text_feat, image_ids, text_ids, epoch)
+            if not self.learnable_temp:
+                avg_tau = torch.tensor(self.temp)
+            else:
+                avg_tau = self.temp
+            info_dict['avg_text_tau'] = avg_text_tau
+            info_dict['avg_image_tau'] = avg_image_tau
+            info_dict['lamda'] = 0.0
+
+        elif self.ita_type == 'sogclr_v2_mine':
             if self.distributed:
                 image_ids = concat_all_gather(idx)
                 text_ids = concat_all_gather(text_idx)
