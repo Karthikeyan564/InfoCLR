@@ -268,7 +268,7 @@ class SogCLR_Loss_mine(nn.Module):
         return total_loss, 0.0, 0.0
 
 class SogCLR_v2_mine(nn.Module):
-    def __init__(self, dim_size, N=2900000, gamma=0.1, temperature=0.07, world_size=8, bsz=128, enable_surrogate=False, surrogate_c=1.0, std_coeff=25.0, cov_coeff=1.0):
+    def __init__(self, dim_size, N=2900000, gamma=0.1, temperature=0.07, world_size=8, bsz=128, enable_surrogate=False, surrogate_c=1.0, std_coeff=5.0, cov_coeff=1.0):
         
         #Inputs:
         #   N is number of samples in training set

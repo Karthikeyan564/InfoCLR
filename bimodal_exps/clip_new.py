@@ -482,43 +482,44 @@ def eval_runner(args):
     model = model.to(device)
 
     assert len(args.checkpoint) > 0
-    checkpoint = torch.load(args.checkpoint, map_location='cpu') 
-    state_dict = checkpoint['model']
-    model.load_state_dict(state_dict, strict=False)
-    print('load checkpoint from %s' % args.checkpoint)
+    for epoch in range(args.epochs):
+        checkpoint = torch.load(args.checkpoint +'checkpoint_'+ str(epoch+1), map_location='cpu') 
+        state_dict = checkpoint['model']
+        model.load_state_dict(state_dict, strict=False)
+        print('load checkpoint from %s' % args.checkpoint)
 
 
-    print("Start Evaluation")
-    start_time = time.time()   
+        print("Start Evaluation")
+        start_time = time.time()   
 
-    score_val_i2t_coco, score_val_t2i_coco = evaluation(model, val_coco_loader, tokenizer, device, args)
+        score_val_i2t_coco, score_val_t2i_coco = evaluation(model, val_coco_loader, tokenizer, device, args)
 
-    val_result_coco = itm_eval(score_val_i2t_coco, score_val_t2i_coco, val_coco_loader.dataset.txt2img, val_coco_loader.dataset.img2txt)  
-    print("coco val:", val_result_coco)
-    
-    if args.zs_dataset:
-        zeroshot_results = zeroshot_transfer(model, zeroshot_dataloader, args.zs_dataset, tokenizer, device)
-        print("zeroshot:", zeroshot_results)
-    else:
-        zeroshot_results = None  
-
-    log_stats = {**{f'val_{k}': v for k, v in val_result_coco.items()},               
-                    'epoch': 0,
-                    'data': 'coco',
-                }
-    with open(os.path.join(args.output_dir, "coco_log.txt"),"a") as f:
-        f.write(json.dumps(log_stats) + "\n")
-
-
-        if zeroshot_results:
-            with open(os.path.join(args.output_dir, f"zeroshot_{args.zs_dataset}_log.txt"), "a") as f:
-                f.write(json.dumps(zeroshot_results) + "\n")
+        val_result_coco = itm_eval(score_val_i2t_coco, score_val_t2i_coco, val_coco_loader.dataset.txt2img, val_coco_loader.dataset.img2txt)  
+        print("coco val:", val_result_coco)
         
-    torch.cuda.empty_cache()
+        if args.zs_dataset:
+            zeroshot_results = zeroshot_transfer(model, zeroshot_dataloader, args.zs_dataset, tokenizer, device)
+            print("zeroshot:", zeroshot_results)
+        else:
+            zeroshot_results = None  
 
-    total_time = time.time() - start_time
-    total_time_str = str(datetime.timedelta(seconds=int(total_time)))
-    print('Evaluation time {}'.format(total_time_str))         
+        log_stats = {**{f'val_{k}': v for k, v in val_result_coco.items()},               
+                        'epoch': epoch,
+                        'data': 'coco',
+                    }
+        with open(os.path.join(args.output_dir, "coco_log.txt"),"a") as f:
+            f.write(json.dumps(log_stats) + "\n")
+
+
+            if zeroshot_results:
+                with open(os.path.join(args.output_dir, f"zeroshot_{args.zs_dataset}_log.txt"), "a") as f:
+                    f.write(json.dumps(zeroshot_results) + "\n")
+            
+        torch.cuda.empty_cache()
+
+        total_time = time.time() - start_time
+        total_time_str = str(datetime.timedelta(seconds=int(total_time)))
+        print('Evaluation time {}'.format(total_time_str))         
 
             
 if __name__ == '__main__':
@@ -574,7 +575,7 @@ if __name__ == '__main__':
 
     # loss config
     parser.add_argument('--ita_type', required=True, choices=['clip', 'cyclip', 'vicreg', 'sogclr', 'sogclr_dro', 
-                        'isogclr_new_v2', 'isogclr_new_v1', 'isogclr_new', 'onlineclr', 'sogclr_mine', 'sogclr_v2_mine'])
+                        'isogclr_new_v2', 'isogclr_new_v1', 'isogclr_new', 'onlineclr'])
     parser.add_argument('--vicreg_sim_coeff', default=25.0, type=float)
     parser.add_argument('--vicreg_std_coeff', default=25.0, type=float)
     parser.add_argument('--sogclr_gamma', default=0.8, type=float)
