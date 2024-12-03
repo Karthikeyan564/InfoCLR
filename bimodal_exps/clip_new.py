@@ -481,15 +481,16 @@ def eval_runner(args):
                     use_temp_net=args.isogclr_temp_net, alpha=args.alpha, distributed=args.distributed)
     model = model.to(device)
 
+    print("Start Evaluation")
+
     assert len(args.checkpoint) > 0
     for epoch in range(args.epochs):
-        checkpoint = torch.load(args.checkpoint +'checkpoint_'+ str(epoch+1), map_location='cpu') 
+        print("Evaluating Epoch: "+str(epoch)+" at" + args.checkpoint +'checkpoint_'+ str(epoch+1)+".pth")
+        checkpoint = torch.load(args.checkpoint +'checkpoint_'+ str(epoch+1)+".pth", map_location='cpu') 
         state_dict = checkpoint['model']
         model.load_state_dict(state_dict, strict=False)
-        print('load checkpoint from %s' % args.checkpoint)
+        # print('load checkpoint from %s' % args.checkpoint)
 
-
-        print("Start Evaluation")
         start_time = time.time()   
 
         score_val_i2t_coco, score_val_t2i_coco = evaluation(model, val_coco_loader, tokenizer, device, args)
@@ -512,6 +513,7 @@ def eval_runner(args):
 
 
             if zeroshot_results:
+                zeroshot_results['epoch'] = epoch
                 with open(os.path.join(args.output_dir, f"zeroshot_{args.zs_dataset}_log.txt"), "a") as f:
                     f.write(json.dumps(zeroshot_results) + "\n")
             
@@ -575,7 +577,7 @@ if __name__ == '__main__':
 
     # loss config
     parser.add_argument('--ita_type', required=True, choices=['clip', 'cyclip', 'vicreg', 'sogclr', 'sogclr_dro', 
-                        'isogclr_new_v2', 'isogclr_new_v1', 'isogclr_new', 'onlineclr'])
+                        'isogclr_new_v2', 'isogclr_new_v1', 'isogclr_new', 'onlineclr', 'sogclr_mine', 'sogclr_v2_mine', 'hybrid'])
     parser.add_argument('--vicreg_sim_coeff', default=25.0, type=float)
     parser.add_argument('--vicreg_std_coeff', default=25.0, type=float)
     parser.add_argument('--sogclr_gamma', default=0.8, type=float)

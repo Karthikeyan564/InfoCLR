@@ -1,4 +1,5 @@
 import warnings
+import logging
 def warn(*args, **kwargs):
     pass
 warnings.warn = warn
@@ -124,6 +125,74 @@ def train(model, data_loader, optimizer, tokenizer, epoch, max_epoch, warmup_ste
             metric_logger.update(b_T=0.0)
             metric_logger.update(v=0.0)
             metric_logger.update(lamda=info_dict['lamda'])
+                # Update metrics for hybrid loss
+        elif args.ita_type == 'hybrid':
+            try:
+                # Get the criterion (handle distributed case)
+                criterion = model.module.criterion if args.distributed else model.criterion
+
+                # Basic metrics that don't require computation
+                metric_logger.update(memory_bank_size=len(criterion.b_I))
+
+                # Safely get warning counts
+                if hasattr(criterion, 'warnings'):
+                    metric_logger.update(memory_warnings=criterion.warnings.get('memory_warnings', 0))
+                    metric_logger.update(gradient_warnings=criterion.warnings.get('gradient_warnings', 0))
+                    metric_logger.update(temperature_warnings=criterion.warnings.get('temperature_warnings', 0))
+
+                # Safely get scalar values with error handling
+                def safe_get_item(tensor):
+                    try:
+                        if tensor is not None and isinstance(tensor, torch.Tensor):
+                            # Ensure tensor is on CPU before calling item()
+                            return tensor.detach().cpu().item()
+                        return 0.0
+                    except Exception as e:
+                        logging.warning(f"Error getting tensor value: {e}")
+                        return 0.0
+
+                # Update scales if they exist
+                if hasattr(criterion, 'running_base_scale'):
+                    metric_logger.update(base_scale=safe_get_item(criterion.running_base_scale))
+                if hasattr(criterion, 'running_cov_scale'):
+                    metric_logger.update(cov_scale=safe_get_item(criterion.running_cov_scale))
+                if hasattr(criterion, 'running_diff_scale'):
+                    metric_logger.update(diff_scale=safe_get_item(criterion.running_diff_scale))
+
+                # Update temperature if it exists
+                if hasattr(criterion, 'current_temperature'):
+                    metric_logger.update(temperature=safe_get_item(criterion.current_temperature))
+
+                # Safely compute and update memory bank norms
+                def safe_compute_norm(tensor):
+                    try:
+                        if tensor is not None and tensor.numel() > 0:
+                            # Compute norm in chunks to avoid OOM
+                            chunk_size = 1024
+                            norms = []
+                            for i in range(0, tensor.shape[0], chunk_size):
+                                chunk = tensor[i:i + chunk_size].detach()
+                                norms.append(torch.norm(chunk, dim=1).mean().item())
+                            return sum(norms) / len(norms) if norms else 0.0
+                        return 0.0
+                    except Exception as e:
+                        logging.warning(f"Error computing norm: {e}")
+                        return 0.0
+
+                # Update memory bank norms safely
+                if hasattr(criterion, 'b_I'):
+                    metric_logger.update(image_bank_norm=safe_compute_norm(criterion.b_I))
+                if hasattr(criterion, 'b_T'):
+                    metric_logger.update(text_bank_norm=safe_compute_norm(criterion.b_T))
+
+                # Log accumulated warnings if any
+                if hasattr(criterion, 'warnings') and any(criterion.warnings.values()):
+                    logging.warning(f"Training warnings: {criterion.warnings}")
+
+            except Exception as e:
+                logging.error(f"Error updating metrics: {str(e)}")
+                # Continue training even if metric update fails
+                pass
         else:
             metric_logger.update(avg_image_tau=info_dict['avg_image_tau'])
             metric_logger.update(avg_text_tau=info_dict['avg_text_tau'])
@@ -574,7 +643,7 @@ if __name__ == '__main__':
 
     # loss config
     parser.add_argument('--ita_type', required=True, choices=['clip', 'cyclip', 'vicreg', 'sogclr', 'sogclr_dro', 
-                        'isogclr_new_v2', 'isogclr_new_v1', 'isogclr_new', 'onlineclr', 'sogclr_mine', 'sogclr_v2_mine'])
+                        'isogclr_new_v2', 'isogclr_new_v1', 'isogclr_new', 'onlineclr', 'sogclr_mine', 'sogclr_v2_mine', 'hybrid'])
     parser.add_argument('--vicreg_sim_coeff', default=25.0, type=float)
     parser.add_argument('--vicreg_std_coeff', default=25.0, type=float)
     parser.add_argument('--sogclr_gamma', default=0.8, type=float)
@@ -591,6 +660,30 @@ if __name__ == '__main__':
     parser.add_argument('--store_tau', action='store_true')
     parser.add_argument('--isogclr_temp_net', action='store_true')
     parser.add_argument('--alpha', default=1.0, type=float, help='for isogclr_denoise')
+
+    parser.add_argument('--num_strategies', default=3, type=int,
+                       help='Number of negative sampling strategies')
+    parser.add_argument('--neg_samples_per_strategy', default=256, type=int,
+                       help='Number of negative samples per strategy')
+    parser.add_argument('--memory_bank_size', default=65536, type=int,
+                       help='Size of memory bank')
+    parser.add_argument('--memory_bank_momentum', default=0.99, type=float,
+                       help='Momentum for memory bank updates')
+    parser.add_argument('--hybrid_gamma', default=0.8, type=float,
+                       help='Momentum factor for running statistics')
+    parser.add_argument('--hybrid_tau_min', default=0.005, type=float,
+                       help='Minimum temperature value')
+    parser.add_argument('--hybrid_tau_max', default=1.0, type=float,
+                       help='Maximum temperature value')
+    # In your config file or argument parser
+    parser.add_argument('--total_epochs', type=int, default=100,
+                        help='Total number of training epochs')
+    parser.add_argument('--hybrid_memory_momentum', type=float, default=0.9,
+                        help='Momentum for memory bank updates')
+    parser.add_argument('--hybrid_cross_modal_weight', type=float, default=0.5,
+                        help='Weight for cross-modal loss term')
+    parser.add_argument('--hybrid_difficulty_weight', type=float, default=0.1,
+                        help='Weight for difficulty-aware loss term')
 
     # set the fraction of data used for training
     parser.add_argument('--train_frac', default=1.0, type=float)
@@ -615,14 +708,7 @@ if __name__ == '__main__':
     args.train_image_root = os.path.join(args.data_path, args.train_image_root)
 
     args.val_coco_file = os.path.join(args.ann_path, 'coco_val.json')
-    # args.test_coco_file = os.path.join(args.ann_path, 'coco_test.json')
     args.coco_image_root = os.path.join(args.data_path, 'mscoco_val/mscoco_val2014_subset_5k')
-    # args.val_flickr_file = os.path.join(args.data_path, 'clip_train/flickr30k_val.json')
-    # args.test_flickr_file = os.path.join(args.data_path, 'clip_train/flickr30k_test.json')
-    # args.flickr_image_root = os.path.join(args.data_path, 'flickr30k')
-
-    # args.sbu_file = os.path.join(args.data_path, 'clip_train/sbu_train_new.json')
-    # args.sbu_image_root = os.path.join(args.data_path, 'sbu')
 
     Path(args.output_dir).mkdir(parents=True, exist_ok=True)
 

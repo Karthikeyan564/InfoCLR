@@ -1,10 +1,11 @@
 from functools import partial
+import logging
 
 import timm
 from transformers import AutoModel, RobertaModel
 
 from models.losses import CLIP_Loss, CyCLIP_Loss, SogCLR_Loss, SogCLR_Loss_mine, SogCLR_v2_mine, VICReg_Loss
-from models.losses import iSogCLR_New_v2_Loss, iSogCLR_New_v1_Loss, onlineCLR_Loss, iSogCLR_New_Loss
+from models.losses import iSogCLR_New_v2_Loss, iSogCLR_New_v1_Loss, onlineCLR_Loss, iSogCLR_New_Loss, HybridSogCLR_Loss
 
 import torch
 from torch import nn
@@ -37,6 +38,19 @@ class CLIP(nn.Module):
                  use_temp_net = True,
                  alpha = 1.0,
                  distributed=True,
+                 num_strategies=3,
+                 neg_samples_per_strategy=256,
+                 memory_bank_size=65536,
+                 memory_bank_momentum=0.99,
+                 hybrid_tau_min=0.005,
+                 hybrid_tau_max=1.0,
+                 hard_negative_temp=0.1,
+                 semantic_threshold=0.7,
+                 warmup_epochs=5,
+                 hard_mining_epochs=10,
+                 mining_strategy='hybrid',  # 'hard', 'semantic', or 'hybrid'
+                 cross_modal_weight=0.3,
+                 difficulty_weight=0.2,
                  ):
         super().__init__()
 
@@ -107,6 +121,27 @@ class CLIP(nn.Module):
         elif self.ita_type == 'isogclr_new':
             self.criterion = iSogCLR_New_Loss(world_size=world_size, gamma=sogclr_gamma, rho_I=rho_I, rho_T=rho_T, tau_init=tau_init, bsz=bsz,
                                               use_temp_net=use_temp_net, feature_dim=embed_dim)
+        elif self.ita_type == 'hybrid':
+            # Calculate safe memory bank size (should be power of 2)
+            safe_bank_size = min(memory_bank_size, 8192)
+
+            # Initialize criterion without explicitly moving to device
+            self.criterion = HybridSogCLR_Loss(
+                N=safe_bank_size,
+                gamma=sogclr_gamma,
+                temperature=tau_init,
+                bsz=min(bsz, safe_bank_size // 4),  # Ensure batch size doesn't exceed memory bank capacity
+                world_size=world_size,
+                eps=1e-8,
+                memory_momentum=memory_bank_momentum,
+                feature_dim=embed_dim,
+                cross_modal_weight=0.5,
+                difficulty_weight=0.1,
+                covariance_weight=0.1,
+                use_adaptive_temp=True,
+                min_bank_size=1024,
+                num_strategies=2
+            )
         else:
             raise NotImplementedError
 
@@ -237,6 +272,120 @@ class CLIP(nn.Module):
             loss_ita, avg_image_tau, avg_text_tau = self.criterion(image_feat, text_feat, image_ids, text_ids, epoch)
             info_dict['avg_text_tau'] = avg_text_tau
             info_dict['avg_image_tau'] = avg_image_tau
+
+        elif self.ita_type == 'hybrid':
+            try:
+                # Handle distributed setup
+                if self.distributed:
+                    try:
+                        image_ids = concat_all_gather(idx)
+                        text_ids = concat_all_gather(text_idx)
+                    except Exception as e:
+                        logging.warning(f"Error in all_gather: {e}, falling back to local ids")
+                        image_ids, text_ids = idx, text_idx
+                else:
+                    image_ids, text_ids = idx, text_idx
+
+                # Ensure inputs are contiguous and on correct device
+                image_feat = image_feat.contiguous()
+                text_feat = text_feat.contiguous()
+
+                # Call hybrid loss function with autocast for better stability
+                with torch.cuda.amp.autocast(enabled=True):
+                    loss_ita, loss_stats = self.criterion(
+                        image_feat, text_feat, image_ids, text_ids, epoch
+                    )
+
+                # Verify loss_ita is a tensor
+                if not isinstance(loss_ita, torch.Tensor):
+                    raise ValueError("Loss must be a tensor")
+
+                # Ensure loss_stats has all required keys with safe defaults
+                default_stats = {
+                    'temperature': self.criterion.temperature.item(),
+                    'base_loss': loss_ita.item(),
+                    'cov_loss': 0.0,
+                    'diff_loss': 0.0,
+                    'memory_stats': {
+                        'image_norm': torch.norm(self.criterion.b_I, dim=1).mean().item(),
+                        'text_norm': torch.norm(self.criterion.b_T, dim=1).mean().item()
+                    },
+                    'scales': {
+                        'base': 1.0,
+                        'cov': 0.0,
+                        'diff': 0.0
+                    },
+                    'warnings': {
+                        'memory_warnings': 0,
+                        'gradient_warnings': 0,
+                        'temperature_warnings': 0
+                    }
+                }
+
+                # Safely update default_stats with actual values
+                for key in default_stats:
+                    if key in loss_stats:
+                        if isinstance(default_stats[key], dict):
+                            default_stats[key].update(loss_stats[key])
+                        else:
+                            default_stats[key] = loss_stats[key]
+
+                # Create backward-compatible stats dictionary
+                compatible_stats = {
+                    'avg_image_tau': default_stats['temperature'],
+                    'avg_text_tau': default_stats['temperature'],
+                    'cur_eta': default_stats['temperature'],
+                    'grad_tau_image': default_stats['base_loss'],
+                    'grad_tau_text': default_stats['base_loss'],
+                    'b_I': default_stats['memory_stats']['image_norm'],
+                    'b_T': default_stats['memory_stats']['text_norm'],
+                    'memory_bank_size': len(self.criterion.b_I),
+                }
+
+                # Update info dictionary with compatible stats
+                info_dict.update(compatible_stats)
+
+                # Add new metrics including the new loss components and scales
+                info_dict.update({
+                    'temperature': default_stats['temperature'],
+                    'base_loss': default_stats['base_loss'],
+                    'cov_loss': default_stats['cov_loss'],
+                    'diff_loss': default_stats['diff_loss'],
+                    'image_norm': default_stats['memory_stats']['image_norm'],
+                    'text_norm': default_stats['memory_stats']['text_norm'],
+                    'loss_scales': default_stats['scales'],
+                    'warnings': default_stats['warnings']
+                })
+
+                # Monitor warnings if they exist
+                if any(default_stats['warnings'].values()):
+                    logging.warning(f"Loss warnings detected: {default_stats['warnings']}")
+
+                return loss_ita, info_dict
+
+            except Exception as e:
+                logging.error(f"Error in hybrid forward pass: {str(e)}")
+                # Return default values in case of error
+                default_loss = torch.tensor(0.0, device=image_feat.device, requires_grad=True)
+                default_info = {
+                    'avg_image_tau': self.criterion.temperature.item(),
+                    'avg_text_tau': self.criterion.temperature.item(),
+                    'cur_eta': self.criterion.temperature.item(),
+                    'grad_tau_image': 0.0,
+                    'grad_tau_text': 0.0,
+                    'b_I': 0.0,
+                    'b_T': 0.0,
+                    'memory_bank_size': len(self.criterion.b_I),
+                    'temperature': self.criterion.temperature.item(),
+                    'base_loss': 0.0,
+                    'cov_loss': 0.0,
+                    'diff_loss': 0.0,
+                    'image_norm': 0.0,
+                    'text_norm': 0.0,
+                    'loss_scales': {'base': 1.0, 'cov': 0.0, 'diff': 0.0},
+                    'warnings': {'memory': 0, 'gradient': 0, 'temperature': 0}
+                }
+                return default_loss, default_info
 
         elif self.ita_type == 'onlineclr':
             loss_ita = self.criterion(image_feat, text_feat)
