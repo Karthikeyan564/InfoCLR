@@ -7,7 +7,7 @@ Fred Cui (335006966)
 
 ## Getting Started
 
-This repo contains the code for training the CLIP model. We have added two new loss functions: InfoSogCLR(sogclr_mine) by Karthikeyan Renga Rajan and HybridSogCLR(hybrid) by Fred Cui.
+This repo contains the code for training the CLIP model. We have added two new loss functions: InfoSogCLR(ita_type=sogclr_mine) by Karthikeyan Renga Rajan and HybridSogCLR(ita_type=hybrid) by Fred Cui.
 
 ### Environment
 
@@ -47,6 +47,7 @@ pip install -r requirements.txt
     data=cc3m
     train_file=${data}_train_subset.json
     gamma=0.8
+    rho=6.0
     epochs=30
     ita_type=isogclr_new
 
@@ -60,7 +61,7 @@ pip install -r requirements.txt
         --use_amp \
         --ita_type ${ita_type} \
         --tau_init 0.01 \
-        --sogclr_gamma ${gamma} \
+        --sogclr_gamma ${gamma} --rho_init ${rho} \
         --eta_init 0.03 --sched cosine \
         --no-distributed \
         --epochs ${epochs}
@@ -76,6 +77,7 @@ pip install -r requirements.txt
     data=cc3m
     train_file=${data}_train_subset.json
     gamma=0.8
+    rho=6.0
     epochs=30
     ita_type=isogclr_new
 
@@ -89,7 +91,7 @@ pip install -r requirements.txt
         --use_amp \
         --ita_type ${ita_type} \
         --tau_init 0.01 \
-        --sogclr_gamma ${gamma} \
+        --sogclr_gamma ${gamma} --rho_init ${rho} \
         --eta_init 0.03 --sched cosine \
         --no-distributed \
         --epochs ${epochs} \

@@ -23,8 +23,9 @@ train_image_root=cc3m_subset_100k/
 data=cc3m
 train_file=${data}_train_subset.json
 gamma=0.8
+rho=6.0
 epochs=30
-ita_type=sogclr
+ita_type=isogclr_new
 
 CUDA_VISIBLE_DEVICES=0 python ./bimodal_exps/clip.py \
     --data_path ${data_path} \
@@ -36,7 +37,7 @@ CUDA_VISIBLE_DEVICES=0 python ./bimodal_exps/clip.py \
     --use_amp \
     --ita_type ${ita_type} \
     --tau_init 0.01 \
-    --sogclr_gamma ${gamma} \
+    --sogclr_gamma ${gamma} --rho_init ${rho} \
     --eta_init 0.03 --sched cosine \
     --no-distributed \
     --epochs ${epochs} \
