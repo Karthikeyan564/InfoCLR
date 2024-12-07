@@ -93,7 +93,7 @@ pip install -r requirements.txt
         --eta_init 0.03 --sched cosine \
         --no-distributed \
         --epochs ${epochs} \
-        --evaluate --checkpoint ../output/checkpoint_30.pth
+        --evaluate --checkpoint ../checkpoint_30.pth
     ```
 
 ## References
